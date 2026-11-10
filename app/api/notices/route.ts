@@ -1,6 +1,7 @@
 import { auth } from '@/auth';
 import { connectDB, databaseConfigured, Notice } from '@/lib/db';
 import mongoose from 'mongoose';
+import { parseJsonBody } from '@/lib/http';
 export async function GET() {
   if (!databaseConfigured()) return Response.json({ notices: [], configured: false });
   try { await connectDB(); const notices = await Notice.find().sort({ createdAt: -1 }).limit(50).lean(); return Response.json({ notices, configured: true }); }
@@ -11,13 +12,16 @@ async function mutate(request: Request, remove: boolean) {
   if (!databaseConfigured()) return Response.json({ error: '서버 설정이 필요합니다.' }, { status: 503 });
   const session = await auth();
   if (!session?.user?.id) return Response.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+  // Parse before the try: a malformed or oversized body is a client error (400/413), not a 503.
+  const parsed = await parseJsonBody(request);
+  if ('error' in parsed) return parsed.error;
+  const { id, title, content } = parsed.body;
   try {
-    const { id, title, content } = await request.json();
     if (typeof id !== 'string' || !mongoose.isValidObjectId(id)) return Response.json({ error: '올바르지 않은 게시글입니다.' }, { status: 400 });
     if (!remove && (typeof title !== 'string' || typeof content !== 'string' || !title.trim() || title.length > 100 || !content.trim() || content.length > 5000)) return Response.json({ error: '제목 1~100자, 본문 1~5000자를 입력하세요.' }, { status: 400 });
     await connectDB();
     const filter = { _id: id, authorId: session.user.id };
-    const notice = remove ? await Notice.findOneAndDelete(filter) : await Notice.findOneAndUpdate(filter, { $set: { title: title.trim(), content: content.trim() } }, { new: true });
+    const notice = remove ? await Notice.findOneAndDelete(filter) : await Notice.findOneAndUpdate(filter, { $set: { title: (title as string).trim(), content: (content as string).trim() } }, { new: true });
     if (!notice) return Response.json({ error: '게시글이 없거나 수정 권한이 없습니다.' }, { status: 404 });
     return Response.json({ notice });
   } catch { return Response.json({ error: '게시글 변경에 실패했습니다.' }, { status: 503 }); }
@@ -29,8 +33,10 @@ export async function POST(request: Request) {
   if (!databaseConfigured()) return Response.json({ error: '게시판 작성은 MongoDB 및 인증 설정이 필요합니다.' }, { status: 503 });
   const session = await auth();
   if (!session?.user?.id) return Response.json({ error: '로그인 후 작성하세요.' }, { status: 401 });
+  const parsed = await parseJsonBody(request);
+  if ('error' in parsed) return parsed.error;
+  const { title, content } = parsed.body;
   try {
-    const { title, content } = await request.json();
     if (typeof title !== 'string' || typeof content !== 'string' || !title.trim() || title.length > 100 || !content.trim() || content.length > 5000) return Response.json({ error: '제목 1~100자, 본문 1~5000자를 입력하세요.' }, { status: 400 });
     await connectDB();
     const notice = await Notice.create({ title: title.trim(), content: content.trim(), authorId: session.user.id, author: session.user.name });

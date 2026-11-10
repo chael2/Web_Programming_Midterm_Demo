@@ -2,6 +2,7 @@ import { auth } from '@/auth';
 import { connectDB, databaseConfigured, Progress } from '@/lib/db';
 import { labs, normalizeCompleted } from '@/lib/labs';
 import { normalizeRecords } from '@/lib/wargame';
+import { parseJsonBody } from '@/lib/http';
 export async function GET() {
   if (!databaseConfigured()) return Response.json({ error: '서버 저장이 설정되지 않았습니다.' }, { status: 503 });
   const session = await auth();
@@ -14,8 +15,11 @@ export async function POST(request: Request) {
   if (!databaseConfigured()) return Response.json({ error: '서버 저장 설정이 필요합니다.' }, { status: 503 });
   const session = await auth();
   if (!session?.user?.id) return Response.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+  // Parse before the try: a malformed or oversized body is a client error (400/413), not a 503.
+  const parsed = await parseJsonBody(request);
+  if ('error' in parsed) return parsed.error;
+  const { id } = parsed.body;
   try {
-    const { id } = await request.json();
     if (!labs.some(lab => lab.id === id)) return Response.json({ error: '실습 번호가 올바르지 않습니다.' }, { status: 400 });
     await connectDB();
     const record = await Progress.findOneAndUpdate({ userId: session.user.id }, { $addToSet: { completed: id } }, { upsert: true, new: true });

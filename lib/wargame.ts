@@ -51,6 +51,9 @@ export function normalizeRecords(value: unknown, validIds: readonly string[]): R
     const r = raw as Record<string, unknown>;
     const id = r.missionId;
     if (typeof id !== 'string' || !validIds.includes(id)) continue;
+    // Keep the first entry for a mission: MongoDB positional ($) updates write to the
+    // first match, so a legacy duplicate entry must not override it when reading.
+    if (out[id]) continue;
     const date = (v: unknown) => (typeof v === 'string' || v instanceof Date) && !Number.isNaN(new Date(v).getTime()) ? new Date(v).toISOString() : null;
     out[id] = {
       missionId: id,

@@ -1,7 +1,7 @@
 // SERVER-ONLY: flags and hint text. Import this module only from Route Handlers
 // (app/api/**) — never from a 'use client' component, or the flags would ship in
 // the browser bundle. tests/wargame.test.mjs checks that client files don't import it.
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 type MissionSecret = { flagBody: string; hints: [string, string, string]; evidence: (flag: string) => string };
 
@@ -121,16 +121,49 @@ export function hasMission(id: unknown): id is string {
   return typeof id === 'string' && Object.hasOwn(secrets, id);
 }
 
-/**
- * The flag is `SG{<body>}`. If WARGAME_FLAG_SECRET is set (recommended for any
- * shared deployment), an HMAC suffix makes flags unique per deployment so they
- * can't be looked up in this public repository.
- */
+// ---------------------------------------------------------------------------
+// Secrets. The flag bodies above are public (this repository), so any shared
+// deployment must add a secret HMAC suffix. Resolution order:
+//   1. WARGAME_FLAG_SECRET                       (recommended)
+//   2. a key derived from AUTH_SECRET            (already required for login)
+//   3. production only: a random per-process key (works for a single `next start`
+//      process; flags change on restart — a warning is logged)
+//   4. development only: no suffix, readable flags for local testing
+// The random key is kept on globalThis so dev hot-reloads don't rotate it.
+// ---------------------------------------------------------------------------
+type SecretSource = 'flag-secret' | 'auth-secret' | 'ephemeral' | 'none';
+const globalKeys = globalThis as unknown as { __sgEphemeralKey?: string; __sgWarned?: boolean };
+function ephemeralKey() {
+  if (!globalKeys.__sgEphemeralKey) globalKeys.__sgEphemeralKey = randomBytes(32).toString('hex');
+  return globalKeys.__sgEphemeralKey;
+}
+function derive(label: string, secret: string) {
+  return createHmac('sha256', secret).update(`secureguard:${label}`).digest('hex');
+}
+export function flagSecret(): { key: string | null; source: SecretSource } {
+  if (process.env.WARGAME_FLAG_SECRET) return { key: process.env.WARGAME_FLAG_SECRET, source: 'flag-secret' };
+  if (process.env.AUTH_SECRET) return { key: derive('wargame-flag', process.env.AUTH_SECRET), source: 'auth-secret' };
+  if (process.env.NODE_ENV === 'production') {
+    if (!globalKeys.__sgWarned) {
+      globalKeys.__sgWarned = true;
+      console.warn('[secureguard] WARGAME_FLAG_SECRET/AUTH_SECRET is not set: using a random per-process FLAG key. FLAGs change on restart and are not shared across instances.');
+    }
+    return { key: ephemeralKey(), source: 'ephemeral' };
+  }
+  return { key: null, source: 'none' };
+}
+/** Key for signing guest progress cookies; never empty (falls back to a per-process key). */
+function guestKey() {
+  const base = process.env.WARGAME_FLAG_SECRET ?? process.env.AUTH_SECRET;
+  return base ? derive('guest-state', base) : derive('guest-state', ephemeralKey());
+}
+
+/** `SG{<body>}` in local development, `SG{<body>_<8 hex HMAC>}` whenever a key is available. */
 export function flagFor(id: string) {
   const body = secrets[id].flagBody;
-  const secret = process.env.WARGAME_FLAG_SECRET;
-  if (!secret) return `SG{${body}}`;
-  const suffix = createHmac('sha256', secret).update(id).digest('hex').slice(0, 8);
+  const { key } = flagSecret();
+  if (!key) return `SG{${body}}`;
+  const suffix = createHmac('sha256', key).update(id).digest('hex').slice(0, 8);
   return `SG{${body}_${suffix}}`;
 }
 export function verifyFlag(id: string, submitted: string) {
@@ -161,6 +194,53 @@ export function rateLimit(key: string, now = Date.now(), limit = SUBMIT_LIMIT, w
   if (windows.size > 5000) for (const [k, v] of windows) if (!v.some(t => now - t < windowMs)) windows.delete(k);
   return { ok: true, retryAfter: 0 };
 }
+// ---------------------------------------------------------------------------
+// Guest state. Guests have no database row, so the server keeps their per-mission
+// verification and penalty counters in an HMAC-signed, HttpOnly cookie. The submit
+// API computes the guest score from this cookie instead of trusting the request body.
+// A guest can still reset it by clearing cookies (documented limitation); guest scores
+// are only ever stored in that guest's own browser.
+// ---------------------------------------------------------------------------
+export const GUEST_COOKIE = 'sg_guest';
+export type GuestMission = { a: boolean; d: boolean; h: number; w: number };
+export type GuestState = Record<string, GuestMission>;
+const clampN = (v: unknown, max: number) => typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(0, Math.trunc(v))) : 0;
+const sign = (payload: string) => createHmac('sha256', guestKey()).update(payload).digest('base64url');
+
+export function emptyGuestMission(): GuestMission { return { a: false, d: false, h: 0, w: 0 }; }
+export function encodeGuestState(state: GuestState) {
+  const payload = Buffer.from(JSON.stringify(state)).toString('base64url');
+  return `${payload}.${sign(payload)}`;
+}
+/** Returns the verified state, or an empty state for a missing, malformed or tampered cookie. */
+export function decodeGuestState(value: string | undefined | null): GuestState {
+  if (!value || value.length > 4096) return {};
+  const [payload, signature, extra] = value.split('.');
+  if (!payload || !signature || extra !== undefined) return {};
+  const expected = Buffer.from(sign(payload));
+  const given = Buffer.from(signature);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return {};
+  try {
+    const raw = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, Record<string, unknown>>;
+    const state: GuestState = {};
+    for (const [id, m] of Object.entries(raw ?? {})) {
+      if (!hasMission(id) || !m || typeof m !== 'object') continue;
+      state[id] = { a: m.a === true, d: m.d === true, h: clampN(m.h, 3), w: clampN(m.w, 1000) };
+    }
+    return state;
+  } catch { return {}; }
+}
+export function readGuestState(request: Request): GuestState {
+  const cookie = request.headers.get('cookie') ?? '';
+  const match = cookie.split(';').map(c => c.trim()).find(c => c.startsWith(`${GUEST_COOKIE}=`));
+  return decodeGuestState(match ? decodeURIComponent(match.slice(GUEST_COOKIE.length + 1)) : null);
+}
+/** Set-Cookie header value. `Secure` only over HTTPS so a plain-HTTP local demo still works. */
+export function guestCookieHeader(request: Request, state: GuestState) {
+  const https = new URL(request.url).protocol === 'https:' || request.headers.get('x-forwarded-proto') === 'https';
+  return `${GUEST_COOKIE}=${encodeGuestState(state)}; Path=/api/wargame; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}${https ? '; Secure' : ''}`;
+}
+
 export function clientKey(request: Request, userId?: string) {
   if (userId) return `u:${userId}`;
   const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
