@@ -1,24 +1,26 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { labs, owaspCategories, categoryUrl, normalizeCompleted, completedCategories } from '@/lib/labs';
-import { basePoints, maxTotalScore, normalizeRecords, totalScore, MAX_HINTS, type MissionRecord } from '@/lib/wargame';
+import { owaspCategories, categoryUrl, normalizeCompleted, completedCategories } from '@/lib/labs';
+import type { PublicMission } from '@/lib/mission-engine';
+import { maxMissionScore, maxTotalScore, normalizeRecords, rankFor, totalScore, MAX_HINTS, RANKS, type MissionRecord } from '@/lib/wargame';
 import { logoutAction } from '@/app/actions';
 import { MissionDetail } from '@/components/Wargame';
 import { Meter, PageHeader, SectionHeader, StatusTag, type TagState } from '@/components/ui';
 
 const GUEST_PROGRESS_KEY = 'secureguard-guest-progress';
 const GUEST_WARGAME_KEY = 'secureguard-guest-wargame';
-const labIds = labs.map(lab => lab.id) as string[];
 
-type Tab = 'dashboard' | 'labs' | 'guide' | 'report' | 'notices';
-type Lab = typeof labs[number];
+type Tab = 'dashboard' | 'missions' | 'guide' | 'report' | 'notices';
+type Lab = PublicMission;
 type Records = Record<string, MissionRecord>;
 type Notice = { _id: string; title: string; content: string; author: string; authorId: string; createdAt: string };
-const nav: { id: Tab; title: string }[] = [{ id: 'dashboard', title: '대시보드' }, { id: 'labs', title: '워게임 미션' }, { id: 'guide', title: '시큐어코딩 가이드' }, { id: 'report', title: '학습 리포트' }, { id: 'notices', title: '학습 게시판' }];
+const nav: { id: Tab; title: string }[] = [{ id: 'dashboard', title: '대시보드' }, { id: 'missions', title: '워게임 미션' }, { id: 'guide', title: '시큐어코딩 가이드' }, { id: 'report', title: '학습 리포트' }, { id: 'notices', title: '학습 게시판' }];
 const formatWhen = (iso: string) => new Date(iso).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 
-export default function Playground({ user }: { user: { name: string; id: string } | null }) {
+export default function Playground({ user, missions, missionError }: { user: { name: string; id: string; isAdmin?: boolean } | null; missions: PublicMission[]; missionError?: string | null }) {
+  const labIds = missions.map(m => m.id);
+  const labKey = labIds.join(',');
   const [tab, setTab] = useState<Tab>('dashboard');
   const [selected, setSelected] = useState<string | null>(null);
   const [completed, setCompleted] = useState<string[]>([]);
@@ -32,46 +34,50 @@ export default function Playground({ user }: { user: { name: string; id: string 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<Notice | null>(null);
-  const activeLab = labs.find(lab => lab.id === selected);
-  const progress = Math.round(completed.length / labs.length * 100);
+  const activeLab = missions.find(lab => lab.id === selected);
+  const progress = Math.round(completed.length / missions.length * 100);
   useEffect(() => {
     let cancelled = false;
+    const labIds = labKey ? labKey.split(',') : [];
     async function load() {
       try {
         if (user) {
           const response = await fetch('/api/progress'); const data = await response.json();
           if (!response.ok) throw new Error(data.error);
-          if (!cancelled) { setCompleted(normalizeCompleted(data.completed)); setRecords(normalizeRecords(data.wargame, labIds)); }
+          if (!cancelled) { setCompleted(normalizeCompleted(data.completed, labIds)); setRecords(normalizeRecords(data.wargame, labIds)); }
         } else {
           const stored = JSON.parse(localStorage.getItem(GUEST_PROGRESS_KEY) ?? '[]');
-          if (!cancelled && Array.isArray(stored)) setCompleted(normalizeCompleted(stored));
+          if (!cancelled && Array.isArray(stored)) setCompleted(normalizeCompleted(stored, labIds));
           const storedWargame = JSON.parse(localStorage.getItem(GUEST_WARGAME_KEY) ?? '[]');
           if (!cancelled) setRecords(normalizeRecords(storedWargame, labIds));
         }
       } catch { if (!cancelled) setMessage('학습 기록을 불러오지 못했습니다. 저장소 설정을 확인하세요.'); }
     }
     void load(); return () => { cancelled = true; };
-  }, [user]);
+  }, [user, labKey]);
   useEffect(() => {
     if (tab !== 'notices') return;
     fetch('/api/notices').then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error); setNotices(data.notices); if (!data.configured) setNoticeError('게시판 작성·저장은 MongoDB와 인증 설정 후 사용할 수 있습니다.'); }).catch(() => setNoticeError('게시글을 불러오지 못했습니다.'));
   }, [tab]);
   function navigate(next: Tab) { setTab(next); setSelected(null); setMessage(''); window.scrollTo({ top: 0 }); }
-  function openCategory(id: string) { navigate('labs'); setCategoryFilter(id); setSearch(''); setLevel('전체'); }
-  function openLab(id: string) { setSelected(id); setTab('labs'); setMessage(''); window.scrollTo({ top: 0 }); }
+  function openCategory(id: string) { navigate('missions'); setCategoryFilter(id); setSearch(''); setLevel('전체'); }
+  function openLab(id: string) { setSelected(id); setTab('missions'); setMessage(''); window.scrollTo({ top: 0 }); }
   function persistGuest(key: string, value: unknown) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { setMessage('브라우저 저장소에 기록하지 못했습니다.'); } }
   // Records shown on screen; for signed-in users the server already stored them.
   function updateRecord(record: MissionRecord) {
     setRecords(old => { const next = { ...old, [record.missionId]: record }; if (!user) persistGuest(GUEST_WARGAME_KEY, Object.values(next)); return next; });
   }
   function markCompleted(id: string, serverList?: string[]) {
-    if (serverList) { setCompleted(normalizeCompleted(serverList)); return; }
-    setCompleted(old => { const next = normalizeCompleted([...old, id]); if (!user) persistGuest(GUEST_PROGRESS_KEY, next); return next; });
+    if (serverList) { setCompleted(normalizeCompleted(serverList, labIds)); return; }
+    setCompleted(old => { const next = normalizeCompleted([...old, id], labIds); if (!user) persistGuest(GUEST_PROGRESS_KEY, next); return next; });
   }
   const score = totalScore(records);
-  const maxScore = maxTotalScore(labs.map(l => l.level));
+  const maxScore = maxTotalScore(missions.map(l => l.level));
+  const rank = rankFor(score, maxScore);
+  /** Points still available: the gap between each mission's best and its maximum. */
+  const toGain = missions.reduce((sum, l) => sum + maxMissionScore(l.level) - (records[l.id]?.bestScore ?? 0), 0);
   const hintMissions = Object.values(records).filter(r => r.hintsUsed > 0).length;
-  const doneCategories = completedCategories(completed);
+  const doneCategories = completedCategories(completed, missions);
   async function deleteNotice(id: string) {
     setSaving(true);
     try {
@@ -84,21 +90,28 @@ export default function Playground({ user }: { user: { name: string; id: string 
     finally { setSaving(false); }
   }
   function exportReport() {
-    const report = ['SecureGuard 학습 리포트', `학습자: ${user?.name ?? '게스트'}`, `생성 시각: ${new Date().toLocaleString('ko-KR')}`, '기준: OWASP Top 10:2025', `분류 완료: ${doneCategories.length} / ${owaspCategories.length}`, `실습 완료: ${completed.length} / ${labs.length}`, `워게임 점수: ${score} / ${maxScore} (미션별 최고 점수 합산)`, '', ...labs.map(l => { const r = records[l.id]; return `${completed.includes(l.id) ? '[완료]' : '[미완료]'} ${l.tag} / ${l.title}\n점수: ${r?.bestScore ? `${r.bestScore} / ${basePoints(l.level)}` : '-'} · 힌트 ${r?.hintsUsed ?? 0}/${MAX_HINTS}${r?.solvedAt ? ` · 최근 완료 ${new Date(r.solvedAt).toLocaleString('ko-KR')}` : ''}\n원인: ${l.cause}\n방어: ${l.defense}`; }), '', '진도는 공격·방어 시연 완료 기록이며, 워게임 점수는 교육용 게임 점수로 보안 역량 평가 점수가 아닙니다.'].join('\n');
+    const report = ['SecureGuard 학습 리포트', `학습자: ${user?.name ?? '게스트'}`, `생성 시각: ${new Date().toLocaleString('ko-KR')}`, '기준: OWASP Top 10:2025', `분류 완료: ${doneCategories.length} / ${owaspCategories.length}`, `실습 완료: ${completed.length} / ${missions.length}`, `워게임 점수: ${score} / ${maxScore} (미션별 최고 점수 합산) · 칭호: ${rank.title}`, '', ...missions.map(l => { const r = records[l.id]; return `${completed.includes(l.id) ? '[완료]' : '[미완료]'} ${l.tag} / ${l.title}\n점수: ${r?.bestScore ? `${r.bestScore} / ${maxMissionScore(l.level)}` : '-'} · 힌트 ${r?.hintsUsed ?? 0}/${MAX_HINTS}${r?.solvedAt ? ` · 최근 완료 ${new Date(r.solvedAt).toLocaleString('ko-KR')}` : ''}\n원인: ${l.cause}\n방어: ${l.defense}`; }), '', '진도는 공격·방어 시연 완료 기록이며, 워게임 점수는 교육용 게임 점수로 보안 역량 평가 점수가 아닙니다.'].join('\n');
     const url = URL.createObjectURL(new Blob([report], { type: 'text/plain;charset=utf-8' })); const a = document.createElement('a'); a.href = url; a.download = 'secureguard-report.txt'; a.click(); URL.revokeObjectURL(url);
   }
-  const filtered = labs.filter(l => (categoryFilter === '전체' || l.categoryId === categoryFilter) && (level === '전체' || l.level === level) && `${l.title} ${l.ko} ${l.category} ${l.tag} ${owaspCategories.find(c => c.id === l.categoryId)?.ko}`.toLowerCase().includes(search.toLowerCase()));
-  const nextLab = labs.find(l => !completed.includes(l.id)) ?? labs[0];
+  const filtered = missions.filter(l => (categoryFilter === '전체' || l.categoryId === categoryFilter) && (level === '전체' || l.level === level) && `${l.title} ${l.ko} ${l.category} ${l.tag} ${owaspCategories.find(c => c.id === l.categoryId)?.ko}`.toLowerCase().includes(search.toLowerCase()));
+  const nextLab = missions.find(l => !completed.includes(l.id)) ?? missions[0];
   const recent = Object.values(records).filter(r => r.solvedAt).sort((a, b) => (b.solvedAt ?? '').localeCompare(a.solvedAt ?? '')).slice(0, 6);
   const state = (id: string) => missionState(id, completed, records);
   const crumb = nav.find(n => n.id === tab)?.title;
+
+  // No missions (database not configured, not seeded yet, or unreachable): explain instead of rendering empty lists.
+  if (!missions.length) return <main className="content">
+    <PageHeader eyebrow="SecureGuard · OWASP 워게임" title="미션을 불러올 수 없습니다" description={missionError ?? '등록된 미션이 없습니다.'} actions={user?.isAdmin ? <Link className="btn btn-primary" href="/admin">미션 관리</Link> : undefined} />
+    <p className="note">미션은 데이터베이스에 저장되어 있습니다. 관리자는 <code className="mono">npm run seed:missions</code>로 초기 미션을 넣거나 /admin에서 추가할 수 있습니다.</p>
+  </main>;
 
   return <div className="app-shell">
     <aside className="sidebar">
       <Link href="/" className="brand"><strong>SecureGuard</strong><span className="brand-sub">OWASP WARGAME</span></Link>
       <nav className="nav" aria-label="주 메뉴">
         <span className="nav-label">MENU</span>
-        {nav.map(item => <button key={item.id} className="nav-item" aria-current={tab === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{item.title}{item.id === 'labs' && <span className="nav-count">{completed.length}/{labs.length}</span>}</button>)}
+        {nav.map(item => <button key={item.id} className="nav-item" aria-current={tab === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{item.title}{item.id === 'missions' && <span className="nav-count">{completed.length}/{missions.length}</span>}</button>)}
+        {user?.isAdmin && <Link className="nav-item" href="/admin">미션 관리<span className="nav-count">admin</span></Link>}
       </nav>
       <div className="sidebar-foot">
         <div><span className="user-name">{user?.name ?? '게스트'}</span><span className="user-meta">{user ? '계정에 진도 저장' : '이 브라우저에 진도 저장'}</span></div>
@@ -108,7 +121,7 @@ export default function Playground({ user }: { user: { name: string; id: string 
 
     <div className="main">
       <header className="topbar">
-        <nav className="crumbs" aria-label="현재 위치"><span>SecureGuard</span><span aria-hidden="true">/</span>{activeLab && tab === 'labs' ? <><button className="link-btn" onClick={() => setSelected(null)}>{crumb}</button><span aria-hidden="true">/</span><span aria-current="page">Mission {activeLab.number}</span></> : <span aria-current="page">{crumb}</span>}</nav>
+        <nav className="crumbs" aria-label="현재 위치"><span>SecureGuard</span><span aria-hidden="true">/</span>{activeLab && tab === 'missions' ? <><button className="link-btn" onClick={() => setSelected(null)}>{crumb}</button><span aria-hidden="true">/</span><span aria-current="page">Mission {activeLab.number}</span></> : <span aria-current="page">{crumb}</span>}</nav>
         <div className="topbar-right"><span className="topbar-note">로컬 시뮬레이션 · 실제 공격 요청 없음</span></div>
       </header>
 
@@ -119,11 +132,18 @@ export default function Playground({ user }: { user: { name: string; id: string 
           <PageHeader eyebrow="OWASP Top 10:2025 · 워게임" title={`${user?.name ?? '게스트'}님의 학습 현황`} description="미션을 골라 공격으로 취약점을 확인하고, 방어 코드로 막히는 것까지 비교하세요. 모든 실습은 브라우저와 서버의 규칙 기반 시뮬레이션입니다." />
           <section className="summary" aria-label="학습 요약">
             <dl className="summary-figures">
-              <div><dt>완료한 미션</dt><dd><b>{completed.length}</b><span>/ {labs.length}</span></dd></div>
+              <div><dt>완료한 미션</dt><dd><b>{completed.length}</b><span>/ {missions.length}</span></dd></div>
               <div><dt>워게임 총점</dt><dd><b>{score}</b><span>/ {maxScore}</span></dd></div>
               <div><dt>완료한 분류</dt><dd><b>{doneCategories.length}</b><span>/ {owaspCategories.length}</span></dd></div>
             </dl>
-            <div className="summary-progress"><span className="fine">전체 진행률 · 점수는 교육용 게임 점수이며 보안 역량 평가가 아닙니다</span><Meter value={completed.length} max={labs.length} label="전체 미션 진행률" /></div>
+            <div className="summary-rank">
+              <p className="eyebrow">칭호 {rank.level} / {rank.levels}</p>
+              <h2>{rank.title}</h2>
+              <Meter value={score} max={maxScore} label="총점 진행률" />
+              <p className="fine">{rank.next ? <>다음 칭호 <b>{rank.next.title}</b>까지 {rank.next.need}점 · </> : '최고 칭호를 달성했습니다 · '}아직 얻을 수 있는 점수 {toGain}점. 보너스를 놓친 미션은 다시 도전해 최고 점수를 올릴 수 있습니다.</p>
+              <ol className="rank-steps" aria-label="칭호 단계">{RANKS.map((r, i) => <li key={r.title} className={i < rank.level ? 'is-done' : ''}>{r.title}<span>{Math.ceil(r.min * maxScore)}점</span></li>)}</ol>
+            </div>
+            <div className="summary-progress"><span className="fine">전체 진행률 · 점수는 교육용 게임 점수이며 보안 역량 평가가 아닙니다</span><Meter value={completed.length} max={missions.length} label="전체 미션 진행률" /></div>
             <div className="summary-next">
               <div><p className="eyebrow">{progress === 100 ? '복습' : '다음 미션'} · Mission {nextLab.number}</p><h2>{nextLab.title}</h2><p>{nextLab.categoryId}:2025 {owaspCategories.find(c => c.id === nextLab.categoryId)!.ko} · {nextLab.level}</p></div>
               <button className="btn btn-primary" onClick={() => openLab(nextLab.id)}>{progress === 100 ? '다시 풀어보기' : completed.length ? '이어서 하기' : '첫 미션 시작'} →</button>
@@ -136,7 +156,7 @@ export default function Playground({ user }: { user: { name: string; id: string 
               <div className="table-wrap"><table className="data-table category-table">
                 <thead><tr><th scope="col">분류</th><th scope="col">이름</th><th scope="col">진행</th><th scope="col" className="right">미션</th></tr></thead>
                 <tbody>{owaspCategories.map(c => {
-                  const items = labs.filter(l => l.categoryId === c.id);
+                  const items = missions.filter(l => l.categoryId === c.id);
                   const count = items.filter(l => completed.includes(l.id)).length;
                   return <tr key={c.id}><td className="num">{c.id}</td><td><button className="row-link" onClick={() => openCategory(c.id)}>{c.ko}</button><small>{c.title}</small></td><td><Meter value={count} max={items.length} label={`${c.id} ${c.ko} 진행률`} /></td><td className="right mono">{count === items.length ? <StatusTag state="done">{count}/{items.length}</StatusTag> : `${count}/${items.length}`}</td></tr>;
                 })}</tbody>
@@ -145,18 +165,18 @@ export default function Playground({ user }: { user: { name: string; id: string 
             <aside>
               <section className="side-block" aria-labelledby="recent-title">
                 <SectionHeader id="recent-title" title="최근 완료" meta="FLAG 제출 기준" />
-                {recent.length ? <ol className="activity-list">{recent.map(r => { const lab = labs.find(l => l.id === r.missionId)!; return <li key={r.missionId}><span className="when">{formatWhen(r.solvedAt!)}</span><button className="what row-link" onClick={() => openLab(lab.id)}>{lab.title}</button><span className="score">{r.lastScore}점</span></li>; })}</ol> : <p className="empty">아직 FLAG를 제출한 미션이 없습니다.</p>}
+                {recent.length ? <ol className="activity-list">{recent.map(r => { const lab = missions.find(l => l.id === r.missionId)!; return <li key={r.missionId}><span className="when">{formatWhen(r.solvedAt!)}</span><button className="what row-link" onClick={() => openLab(lab.id)}>{lab.title}</button><span className="score">{r.lastScore}점</span></li>; })}</ol> : <p className="empty">아직 FLAG를 제출한 미션이 없습니다.</p>}
               </section>
               <section className="side-block" aria-labelledby="best-title">
                 <SectionHeader id="best-title" title="미션별 최고 점수" meta={`${score} / ${maxScore}`} />
-                <ol className="score-list">{labs.map(lab => { const r = records[lab.id]; return <li key={lab.id}><span className="num">{lab.number}</span><button className="t" onClick={() => openLab(lab.id)}>{lab.title}</button><span className="s">{r?.bestScore ? <><b>{r.bestScore}</b>/{basePoints(lab.level)}</> : completed.includes(lab.id) ? '이전 기록' : '—'}</span></li>; })}</ol>
+                <ol className="score-list">{missions.map(lab => { const r = records[lab.id]; return <li key={lab.id}><span className="num">{lab.number}</span><button className="t" onClick={() => openLab(lab.id)}>{lab.title}</button><span className="s">{r?.bestScore ? <><b>{r.bestScore}</b>/{maxMissionScore(lab.level)}</> : completed.includes(lab.id) ? '이전 기록' : '—'}</span></li>; })}</ol>
               </section>
             </aside>
           </div>
         </>}
 
-        {tab === 'labs' && !activeLab && <>
-          <PageHeader eyebrow="OWASP Top 10:2025 · 12 missions" title="워게임 미션" description={`취약점의 원리를 읽고, 공격으로 FLAG를 찾고, 방어 모드로 같은 입력이 막히는지 확인하세요. 최대 ${maxScore}점.`} />
+        {tab === 'missions' && !activeLab && <>
+          <PageHeader eyebrow="OWASP Top 10:2025 · 12 missions" title="워게임 미션" description={`취약점의 원리를 읽고, 공격으로 FLAG를 찾고, 직접 고른 방어로 공격을 막아 보세요. 최대 ${maxScore}점 (보너스 포함).`} />
           <div className="toolbar">
             <div className="segmented" role="group" aria-label="난이도">{['전체', '입문', '중급'].map(value => <button aria-pressed={value === level} onClick={() => setLevel(value)} key={value}>{value}</button>)}</div>
             <select aria-label="OWASP 분류 선택" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}><option value="전체">전체 분류</option>{owaspCategories.map(c => <option key={c.id} value={c.id}>{c.id} · {c.ko}</option>)}</select>
@@ -175,11 +195,11 @@ export default function Playground({ user }: { user: { name: string; id: string 
           <p className="note">학습 범위: OWASP Top 10:2025의 10개 분류를 모두 다룹니다. A01은 접근 제어·CSRF, A05는 SQL Injection·XSS를 포함해 12개 대표 시나리오로 구성했으며, 각 분류의 모든 취약점 변형을 구현한 것은 아닙니다.</p>
         </>}
 
-        {tab === 'labs' && activeLab && <MissionDetail key={activeLab.id} lab={activeLab} signedIn={Boolean(user)} record={records[activeLab.id]} done={completed.includes(activeLab.id)} nextLab={nextMissionAfter(activeLab.id, completed)} onBack={() => setSelected(null)} onOpen={openLab} onRecord={updateRecord} onCompleted={markCompleted} />}
+        {tab === 'missions' && activeLab && <MissionDetail key={activeLab.id} lab={activeLab} signedIn={Boolean(user)} record={records[activeLab.id]} done={completed.includes(activeLab.id)} nextLab={nextMissionAfter(activeLab.id, completed, missions)} onBack={() => setSelected(null)} onOpen={openLab} onRecord={updateRecord} onCompleted={markCompleted} />}
 
         {tab === 'guide' && <>
           <PageHeader eyebrow="Secure coding handbook" title="시큐어코딩 가이드" description="OWASP Top 10:2025의 10개 분류와 12개 대표 시나리오의 발생 원인과 방어 코드를 정리했습니다." />
-          <div className="guide-list">{labs.map(lab => <section className="guide-row" key={lab.id}>
+          <div className="guide-list">{missions.map(lab => <section className="guide-row" key={lab.id}>
             <button className="guide-toggle" aria-expanded={expanded === lab.id} onClick={() => setExpanded(expanded === lab.id ? null : lab.id)}><span className="code">{lab.categoryId}:2025</span><span><strong>{lab.title}</strong><small>{lab.ko}</small></span><span className="sign" aria-hidden="true">{expanded === lab.id ? '−' : '+'}</span></button>
             {expanded === lab.id && <div className="guide-body"><div><h3>발생 원인</h3><p>{lab.cause}</p></div><div><h3>시큐어코딩 원칙</h3><p>{lab.defense}</p></div><div className="span"><pre className="code"><code>{lab.secure}</code></pre></div><div className="span"><button className="btn btn-secondary btn-sm" onClick={() => openLab(lab.id)}>이 미션 풀어보기 →</button></div></div>}
           </section>)}</div>
@@ -191,7 +211,7 @@ export default function Playground({ user }: { user: { name: string; id: string 
 
           <section className="report-section" aria-labelledby="r1"><h2 id="r1"><span className="mono">01</span>요약</h2>
             <dl className="report-summary">
-              <div><dt>미션 완료</dt><dd>{completed.length} / {labs.length} ({progress}%)</dd></div>
+              <div><dt>미션 완료</dt><dd>{completed.length} / {missions.length} ({progress}%)</dd></div>
               <div><dt>분류 완료</dt><dd>{doneCategories.length} / {owaspCategories.length}</dd></div>
               <div><dt>워게임 총점</dt><dd>{score} / {maxScore}</dd></div>
               <div><dt>힌트 사용 미션</dt><dd>{hintMissions}개</dd></div>
@@ -204,11 +224,11 @@ export default function Playground({ user }: { user: { name: string; id: string 
           <section className="report-section" aria-labelledby="r2"><h2 id="r2"><span className="mono">02</span>미션 기록</h2>
             <div className="table-wrap"><table className="data-table">
               <thead><tr><th scope="col">#</th><th scope="col">미션</th><th scope="col">힌트</th><th scope="col" className="right">최고 점수</th><th scope="col">최근 완료</th><th scope="col">상태</th></tr></thead>
-              <tbody>{labs.map(lab => { const r = records[lab.id]; const s = state(lab.id); return <tr key={lab.id}>
+              <tbody>{missions.map(lab => { const r = records[lab.id]; const s = state(lab.id); return <tr key={lab.id}>
                 <td className="num">{lab.number}</td>
                 <td><button className="row-link" onClick={() => openLab(lab.id)}>{lab.title}</button><small>{lab.categoryId}:2025 · {lab.category}</small></td>
                 <td className="mono">{r?.hintsUsed ?? 0}/{MAX_HINTS}</td>
-                <td className="right mono">{r?.bestScore ? `${r.bestScore}/${basePoints(lab.level)}` : '—'}</td>
+                <td className="right mono">{r?.bestScore ? `${r.bestScore}/${maxMissionScore(lab.level)}` : '—'}</td>
                 <td className="mono">{r?.solvedAt ? formatWhen(r.solvedAt) : '—'}</td>
                 <td><StatusTag state={s.state}>{s.label}</StatusTag></td>
               </tr>; })}</tbody>
@@ -216,7 +236,7 @@ export default function Playground({ user }: { user: { name: string; id: string 
           </section>
 
           <section className="report-section" aria-labelledby="r3"><h2 id="r3"><span className="mono">03</span>취약점별 결과</h2>
-            {labs.filter(l => completed.includes(l.id)).length ? labs.filter(l => completed.includes(l.id)).map(lab => <div className="finding" key={lab.id}>
+            {missions.filter(l => completed.includes(l.id)).length ? missions.filter(l => completed.includes(l.id)).map(lab => <div className="finding" key={lab.id}>
               <span className="code">{lab.categoryId}:2025</span>
               <div><h3>{lab.title} <small className="fine">· {lab.ko}</small></h3><p><b>원인</b>{lab.cause}</p><p><b>방어</b>{lab.defense}</p></div>
             </div>) : <p className="empty">완료한 미션이 생기면 취약점별 원인과 방어 방법이 여기에 정리됩니다.</p>}
@@ -261,11 +281,11 @@ function MissionRow({ lab, record, status, onOpen }: { lab: Lab; record?: Missio
     <span><strong>{lab.title}</strong><span className="desc">{lab.description}</span></span>
     <span className="lvl">{lab.level}</span>
     <StatusTag state={status.state}>{status.label}</StatusTag>
-    <span className="pts">{record?.bestScore ? <><b>{record.bestScore}</b>/{basePoints(lab.level)}</> : <>{basePoints(lab.level)}점</>}{record?.hintsUsed ? <small>힌트 {record.hintsUsed}단계</small> : null}</span>
+    <span className="pts">{record?.bestScore ? <><b>{record.bestScore}</b>/{maxMissionScore(lab.level)}</> : <>최대 {maxMissionScore(lab.level)}점</>}{record?.hintsUsed ? <small>힌트 {record.hintsUsed}단계</small> : null}</span>
   </button>;
 }
-function nextMissionAfter(id: string, completed: string[]) {
-  const index = labs.findIndex(l => l.id === id);
-  const ordered = [...labs.slice(index + 1), ...labs.slice(0, index)];
+function nextMissionAfter(id: string, completed: string[], missions: Lab[]) {
+  const index = missions.findIndex(l => l.id === id);
+  const ordered = [...missions.slice(index + 1), ...missions.slice(0, index)];
   return ordered.find(l => !completed.includes(l.id)) ?? ordered[0] ?? null;
 }

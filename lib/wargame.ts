@@ -9,6 +9,21 @@ export const HINT_PENALTY_PERCENT = [0, 10, 30, 60] as const;
 export const WRONG_FLAG_PENALTY_PERCENT = 5;
 export const WRONG_FLAG_PENALTY_CAP_PERCENT = 20;
 export const MIN_SCORE_PERCENT = 20;
+/** Bonuses (percent of base points) that reward solving it yourself and designing a good defense. */
+export const BONUSES = [
+  { id: 'self', label: '스스로 해결', percent: 10, how: '힌트를 쓰지 않고 FLAG를 한 번에 맞히기' },
+  { id: 'firstTry', label: '방어 설계 한 번에 성공', percent: 15, how: '첫 번째 방어 검증에서 모든 테스트 통과' },
+  { id: 'depth', label: '심층 방어', percent: 10, how: '핵심 방어와 함께 보조 방어까지 모두 적용' },
+] as const;
+export type BonusId = (typeof BONUSES)[number]['id'];
+/** Titles by share of the maximum total score. */
+export const RANKS = [
+  { min: 0, title: '보안 입문자' },
+  { min: 0.1, title: '취약점 탐색자' },
+  { min: 0.35, title: '취약점 사냥꾼' },
+  { min: 0.6, title: '보안 수호자' },
+  { min: 0.85, title: '시큐어가드 마스터' },
+] as const;
 
 export type MissionRecord = {
   missionId: string;
@@ -23,6 +38,11 @@ export type MissionRecord = {
   clears: number;
   firstSolvedAt: string | null;
   solvedAt: string | null;
+  /** Defense checks run in the current attempt (reset on clear). */
+  defenseTries: number;
+  /** Set when the defense was verified: passed on the first check / with every defense-in-depth option. */
+  defenseFirstTry: boolean;
+  defenseDepth: boolean;
 };
 
 export function basePoints(level: string) {
@@ -32,15 +52,44 @@ export function clampInt(value: unknown, min: number, max: number) {
   const n = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0;
   return Math.min(max, Math.max(min, n));
 }
-export function computeScore(level: string, hintsUsed: number, wrongSubmissions: number) {
+export type DefenseStats = { defenseFirstTry?: boolean; defenseDepth?: boolean };
+export type ScoreBreakdown = {
+  base: number; hintPenalty: number; wrongPenalty: number; floorApplied: boolean;
+  bonuses: { id: BonusId; label: string; how: string; points: number; earned: boolean }[];
+  total: number; max: number;
+};
+/** Score = base − hint/wrong penalties (never below the floor) + earned bonuses. */
+export function scoreBreakdown(level: string, hintsUsed: number, wrongSubmissions: number, stats: DefenseStats = {}): ScoreBreakdown {
   const base = basePoints(level);
   const hints = clampInt(hintsUsed, 0, MAX_HINTS);
-  const wrong = Math.min(clampInt(wrongSubmissions, 0, 1000) * WRONG_FLAG_PENALTY_PERCENT, WRONG_FLAG_PENALTY_CAP_PERCENT);
-  const percent = Math.max(MIN_SCORE_PERCENT, 100 - HINT_PENALTY_PERCENT[hints] - wrong);
-  return Math.round(base * percent / 100);
+  const wrongCount = clampInt(wrongSubmissions, 0, 1000);
+  const wrong = Math.min(wrongCount * WRONG_FLAG_PENALTY_PERCENT, WRONG_FLAG_PENALTY_CAP_PERCENT);
+  const raw = 100 - HINT_PENALTY_PERCENT[hints] - wrong;
+  const percent = Math.max(MIN_SCORE_PERCENT, raw);
+  const afterPenalty = Math.round(base * percent / 100);
+  const hintPenalty = Math.round(base * HINT_PENALTY_PERCENT[hints] / 100);
+  const earned: Record<BonusId, boolean> = { self: hints === 0 && wrongCount === 0, firstTry: stats.defenseFirstTry === true, depth: stats.defenseDepth === true };
+  const bonuses = BONUSES.map(b => ({ id: b.id, label: b.label, how: b.how, points: Math.round(base * b.percent / 100), earned: earned[b.id] }));
+  const bonus = bonuses.reduce((sum, b) => sum + (b.earned ? b.points : 0), 0);
+  return { base, hintPenalty, wrongPenalty: base - afterPenalty - hintPenalty, floorApplied: raw < MIN_SCORE_PERCENT, bonuses, total: afterPenalty + bonus, max: maxMissionScore(level) };
+}
+export function computeScore(level: string, hintsUsed: number, wrongSubmissions: number, stats: DefenseStats = {}) {
+  return scoreBreakdown(level, hintsUsed, wrongSubmissions, stats).total;
+}
+export function maxMissionScore(level: string) {
+  const base = basePoints(level);
+  return base + BONUSES.reduce((sum, b) => sum + Math.round(base * b.percent / 100), 0);
+}
+/** Current title and how many points are needed for the next one. */
+export function rankFor(score: number, max: number) {
+  const share = max > 0 ? score / max : 0;
+  let i = 0;
+  for (let k = 0; k < RANKS.length; k++) if (share >= RANKS[k].min) i = k;
+  const next = RANKS[i + 1];
+  return { title: RANKS[i].title, level: i + 1, levels: RANKS.length, next: next ? { title: next.title, need: Math.max(1, Math.ceil(next.min * max) - score) } : null };
 }
 export function emptyRecord(missionId: string): MissionRecord {
-  return { missionId, hintsUsed: 0, wrongSubmissions: 0, attackVerified: false, defenseVerified: false, bestScore: 0, lastScore: 0, clears: 0, firstSolvedAt: null, solvedAt: null };
+  return { missionId, hintsUsed: 0, wrongSubmissions: 0, attackVerified: false, defenseVerified: false, bestScore: 0, lastScore: 0, clears: 0, firstSolvedAt: null, solvedAt: null, defenseTries: 0, defenseFirstTry: false, defenseDepth: false };
 }
 /** Sanitizes records coming from localStorage or the DB. Unknown missions are dropped. */
 export function normalizeRecords(value: unknown, validIds: readonly string[]): Record<string, MissionRecord> {
@@ -66,6 +115,9 @@ export function normalizeRecords(value: unknown, validIds: readonly string[]): R
       clears: clampInt(r.clears, 0, 100000),
       firstSolvedAt: date(r.firstSolvedAt),
       solvedAt: date(r.solvedAt),
+      defenseTries: clampInt(r.defenseTries, 0, 1000),
+      defenseFirstTry: r.defenseFirstTry === true,
+      defenseDepth: r.defenseDepth === true,
     };
   }
   return out;
@@ -74,22 +126,7 @@ export function totalScore(records: Record<string, MissionRecord>) {
   return Object.values(records).reduce((sum, r) => sum + r.bestScore, 0);
 }
 export function maxTotalScore(levels: readonly string[]) {
-  return levels.reduce((sum, level) => sum + basePoints(level), 0);
+  return levels.reduce((sum, level) => sum + maxMissionScore(level), 0);
 }
 export const FLAG_PATTERN = /^SG\{[a-z0-9_]{4,80}\}$/;
 
-/** Public mission objectives shown on the mission screen (no answers). */
-export const missionObjectives: Record<string, string> = {
-  access: '내 문서(1001)만 조회할 수 있어야 하는 기능입니다. 다른 사용자의 문서에 숨겨진 FLAG를 찾아내세요.',
-  csrf: '이메일 변경 API가 요청 출처를 확인하는지 시험하고, 위조 요청이 수락될 때 남는 감사 기록에서 FLAG를 찾으세요.',
-  config: '운영 서버에 남아 있는 개발용 기능을 찾아 노출된 설정 값 속 FLAG를 확보하세요.',
-  supply: '승인된 패키지 목록이 없는 빌드 파이프라인에 위장 패키지를 넣어 수집된 토큰에서 FLAG를 찾으세요.',
-  crypto: '결제 정보가 암호화 없이 전송되는 정책을 만들어, 가상 패킷 캡처에서 FLAG를 찾으세요.',
-  injection: '로그인 아이디 입력이 SQL 문자열에 그대로 결합됩니다. 관리자 계정으로 인증을 우회해 세션 메모의 FLAG를 얻으세요.',
-  xss: '댓글이 HTML로 렌더링되는지 확인하고, 피해자 브라우저의 가상 쿠키에 담긴 FLAG를 찾아내세요.',
-  design: '쿠폰 적용 로직이 사용 이력을 확인하는지 시험하고, 중복 할인 장부에서 FLAG를 찾으세요.',
-  auth: '비밀번호 정책이 얼마나 느슨한지 확인하고, 대입 공격으로 탈취된 가상 계정의 메모에서 FLAG를 찾으세요.',
-  integrity: '서명 검증 없이 주문 데이터를 처리하는지 시험하고, 변조된 주문 영수증에서 FLAG를 찾으세요.',
-  logging: '반복된 로그인 실패가 아무 경보 없이 지나가는지 확인하고, 사후에 발견된 공격자 메모의 FLAG를 찾으세요.',
-  exceptions: '권한 서비스 장애 시 요청이 허용되는지(fail-open) 시험하고, 유출된 내보내기 헤더에서 FLAG를 찾으세요.',
-};

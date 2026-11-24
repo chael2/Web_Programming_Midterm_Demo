@@ -23,6 +23,14 @@ export function verifyUpdate(attack: boolean, defense: boolean) {
   return { $set };
 }
 
+/** One defense check: counts the try; when it holds, records the bonus conditions once. Only matches while the defense is not verified yet. */
+export const defendFilter = (userId: string, missionId: string) => ({ userId, wargame: { $elemMatch: { missionId, defenseVerified: false } } });
+export function defendUpdate(held: boolean, firstTry: boolean, depth: boolean) {
+  return held
+    ? { $inc: { 'wargame.$.defenseTries': 1 }, $set: { 'wargame.$.defenseVerified': true, 'wargame.$.defenseFirstTry': firstTry, 'wargame.$.defenseDepth': depth } }
+    : { $inc: { 'wargame.$.defenseTries': 1 } };
+}
+
 /** Hints must be revealed in order: level n only matches when level n-1 was already used. */
 export const hintFilter = (userId: string, missionId: string, level: number) => ({ userId, wargame: { $elemMatch: { missionId, hintsUsed: { $gte: level - 1 } } } });
 export const hintUpdate = (level: number) => ({ $max: { 'wargame.$.hintsUsed': level } });
@@ -39,7 +47,7 @@ export const clearFilter = (userId: string, missionId: string, seen: Counters) =
   wargame: { $elemMatch: { missionId, attackVerified: true, defenseVerified: true, hintsUsed: seen.hintsUsed, wrongSubmissions: seen.wrongSubmissions } },
 });
 export const clearUpdate = (missionId: string, score: number, now: Date) => ({
-  $set: { 'wargame.$.lastScore': score, 'wargame.$.solvedAt': now, 'wargame.$.wrongSubmissions': 0, 'wargame.$.attackVerified': false, 'wargame.$.defenseVerified': false },
+  $set: { 'wargame.$.lastScore': score, 'wargame.$.solvedAt': now, 'wargame.$.wrongSubmissions': 0, 'wargame.$.attackVerified': false, 'wargame.$.defenseVerified': false, 'wargame.$.defenseTries': 0, 'wargame.$.defenseFirstTry': false, 'wargame.$.defenseDepth': false },
   $max: { 'wargame.$.bestScore': score },
   $inc: { 'wargame.$.clears': 1 },
   $addToSet: { completed: missionId },

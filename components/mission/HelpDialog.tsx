@@ -2,14 +2,15 @@
 // On-demand panel for help (how to use — no penalty), hints (how to solve — score penalty)
 // and score rules. Uses the native <dialog> element: focus trap, Esc to close, no library.
 import type { RefObject } from 'react';
-import { computeScore, HINT_PENALTY_PERCENT, MAX_HINTS, MIN_SCORE_PERCENT, WRONG_FLAG_PENALTY_CAP_PERCENT, WRONG_FLAG_PENALTY_PERCENT } from '@/lib/wargame';
+import { HINT_PENALTY_PERCENT, MIN_SCORE_PERCENT, WRONG_FLAG_PENALTY_CAP_PERCENT, WRONG_FLAG_PENALTY_PERCENT } from '@/lib/wargame';
 import type { StepProps } from './GuidedMission';
+import { BonusList, scorePreview } from './ScoreParts';
 
 export type HelpTab = 'help' | 'hints' | 'score';
 const TABS: { id: HelpTab; label: string }[] = [{ id: 'help', label: '도움말' }, { id: 'hints', label: '힌트' }, { id: 'score', label: '점수' }];
 const HINT_LABELS = ['방향 잡기', '핵심 원리', '접근 방법'];
 
-export function HelpDialog({ dialogRef, tab, setTab, step, lab, lesson, guided, session, record, base, signedIn, go }: StepProps & {
+export function HelpDialog({ dialogRef, tab, setTab, step, lab, lesson, guided, session, record, signedIn, go }: StepProps & {
   dialogRef: RefObject<HTMLDialogElement | null>; tab: HelpTab; setTab: (tab: HelpTab) => void; step: number;
 }) {
   const close = () => dialogRef.current?.close();
@@ -30,7 +31,7 @@ export function HelpDialog({ dialogRef, tab, setTab, step, lab, lesson, guided, 
         <ul>{guided.howto[step - 1].map(t => <li key={t}>{t}</li>)}</ul>
         <h3>입력값의 의미</h3>
         <p>{lesson.input.field}</p>
-        <p className="gm-small">{guided.rule}</p>
+        <details className="gm-more"><summary>판정 규칙 보기 (스스로 찾고 싶다면 열지 마세요)</summary><p className="gm-small">{guided.rule}</p></details>
         <h3>개념 다시 보기</h3>
         <p>{guided.brief}</p>
         <button className="link-btn" onClick={() => { close(); go(1); }}>이해하기 단계로 이동</button>
@@ -51,12 +52,15 @@ export function HelpDialog({ dialogRef, tab, setTab, step, lab, lesson, guided, 
       </div>}
 
       {tab === 'score' && <div className="gm-dialog-body">
-        <p className="gm-score-now"><b className="mono">{computeScore(lab.level, record.hintsUsed, record.wrongSubmissions)}</b> / {base}점 <span className="gm-small">지금 제출하면 받을 점수 · 힌트 {record.hintsUsed}/{MAX_HINTS}{record.bestScore ? ` · 최고 ${record.bestScore}점` : ''}</span></p>
+        <p className="gm-score-now"><b className="mono">{scorePreview(lab.level, record).now.total}</b> / {scorePreview(lab.level, record).now.max}점 <span className="gm-small">지금 제출하면 받을 점수 · 이번 도전에서 최대 {scorePreview(lab.level, record).reachable}점 가능{record.bestScore ? ` · 최고 ${record.bestScore}점` : ''}</span></p>
+        <h3>보너스</h3>
+        <BonusList level={lab.level} record={record} />
+        <h3>감점</h3>
         <ul>
           <li>힌트 1단계 −{HINT_PENALTY_PERCENT[1]}%, 2단계까지 −{HINT_PENALTY_PERCENT[2]}%, 3단계까지 −{HINT_PENALTY_PERCENT[3]}% (누적)</li>
           <li>‘공격 예제 입력’은 힌트 3단계 사용으로 기록</li>
           <li>틀린 FLAG 1회당 −{WRONG_FLAG_PENALTY_PERCENT}%, 최대 −{WRONG_FLAG_PENALTY_CAP_PERCENT}% · 형식 오류는 감점 없음</li>
-          <li>최저 {MIN_SCORE_PERCENT}% 보장 · 다시 풀면 미션별 최고 점수만 반영</li>
+          <li>감점 후 최저 {MIN_SCORE_PERCENT}% 보장 · 다시 풀면 미션별 최고 점수만 반영 (방어 보너스는 다시 도전할 때 새로 얻을 수 있음)</li>
           <li>도움말과 이해 확인 질문은 점수에 영향을 주지 않습니다.</li>
         </ul>
         <p className="gm-small">교육용 게임 점수이며 실제 보안 역량을 평가하지 않습니다.</p>

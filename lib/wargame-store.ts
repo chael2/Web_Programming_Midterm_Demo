@@ -3,14 +3,16 @@
 // every query is scoped to the session user's own document.
 import { auth } from '@/auth';
 import { connectDB, databaseConfigured, Progress } from '@/lib/db';
-import { labs, normalizeCompleted } from '@/lib/labs';
+import { normalizeCompleted } from '@/lib/labs';
+import { loadMissions } from '@/lib/missions';
 import { emptyRecord, normalizeRecords, type MissionRecord } from '@/lib/wargame';
 import * as ops from '@/lib/wargame-db-ops';
 export { parseJsonBody, sameOrigin } from '@/lib/http';
+export { findMission } from '@/lib/missions';
 
-export const missionIds = labs.map(lab => lab.id) as string[];
-export function findMission(id: unknown) {
-  return typeof id === 'string' ? labs.find(lab => lab.id === id) : undefined;
+/** Ids of every mission in the database (records of unpublished missions are kept). */
+export async function missionIds() {
+  return (await loadMissions()).map(m => m.missionId);
 }
 export function json(body: unknown, status = 200, headers?: HeadersInit) {
   return Response.json(body, { status, headers });
@@ -37,7 +39,7 @@ async function ensureRecord(userId: string, missionId: string) {
 }
 async function readRecord(userId: string, missionId: string): Promise<MissionRecord> {
   const doc = await Progress.findOne(ops.userFilter(userId), { wargame: { $elemMatch: { missionId } } }).lean<LeanProgress>();
-  return normalizeRecords(doc?.wargame, missionIds)[missionId] ?? emptyRecord(missionId);
+  return normalizeRecords(doc?.wargame, [missionId])[missionId] ?? emptyRecord(missionId);
 }
 
 export async function getRecord(userId: string, missionId: string) {
@@ -64,6 +66,12 @@ export async function addWrongSubmission(userId: string, missionId: string) {
   return readRecord(userId, missionId);
 }
 /** Applies a clear only if the run is still exactly the one the score was computed from. */
+/** Records one defense check atomically. Returns the record after the update. */
+export async function recordDefense(userId: string, missionId: string, held: boolean, depth: boolean) {
+  const before = await getRecord(userId, missionId);
+  if (!before.defenseVerified) await Progress.updateOne(ops.defendFilter(userId, missionId), ops.defendUpdate(held, before.defenseTries === 0, depth));
+  return readRecord(userId, missionId);
+}
 export async function claimClear(userId: string, missionId: string, seen: MissionRecord, score: number) {
   const now = new Date();
   const result = await Progress.updateOne(ops.clearFilter(userId, missionId, seen), ops.clearUpdate(missionId, score, now));
@@ -72,6 +80,6 @@ export async function claimClear(userId: string, missionId: string, seen: Missio
   return true;
 }
 export async function loadProgress(userId: string) {
-  const doc = await Progress.findOne(ops.userFilter(userId)).lean<LeanProgress>();
-  return { records: normalizeRecords(doc?.wargame, missionIds), completed: normalizeCompleted(doc?.completed) };
+  const [doc, ids] = await Promise.all([Progress.findOne(ops.userFilter(userId)).lean<LeanProgress>(), missionIds()]);
+  return { records: normalizeRecords(doc?.wargame, ids), completed: normalizeCompleted(doc?.completed, ids) };
 }

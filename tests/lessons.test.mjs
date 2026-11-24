@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { labs, simulate } from '../lib/labs.ts';
-import { lessons, resolveGuided } from '../lib/lessons.ts';
-import { flagFor, evidenceFor } from '../lib/wargame-server.ts';
+import { resolveGuided } from '../lib/lessons.ts';
+import { labs, lessons, simulate, evidenceTemplate, flagPrefix } from './helpers/seed.mjs';
 
 const strings = value => typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [];
 
@@ -38,7 +37,7 @@ test('defense explanations match what simulate() returns in defense mode', () =>
     if (lab.id === 'xss') assert.ok(result.output.startsWith('텍스트로 안전하게 출력'));
     else if (lab.id === 'logging') { for (const step of ['감사 로그', '경보', '추가 시도 제한']) assert.ok(result.output.includes(step)); }
     else if (lab.id === 'exceptions') assert.ok(result.output.includes('접근 거부 (fail closed)') && compare.includes('접근 거부 (fail closed)'));
-    else { assert.equal(result.output, '요청 거부 / 위험 동작 미수행'); assert.ok(compare.includes('요청 거부'), `${lab.id} compare text should name 요청 거부`); }
+    else { assert.ok(result.output.startsWith('요청 거부 / 위험 동작 미수행'), result.output); assert.ok(compare.includes('요청 거부'), `${lab.id} compare text should name 요청 거부`); }
   }
 });
 
@@ -77,7 +76,7 @@ test('lesson content never contains or hints at the literal FLAG', () => {
     const text = strings(lessons[lab.id]).join('\n');
     // Describing the format as "SG{…}" is allowed; an actual flag-like value is not.
     assert.ok(!/SG\{[a-z0-9_]/.test(text), `${lab.id} lesson must not contain a flag`);
-    assert.ok(!text.includes(flagFor(lab.id).slice(3, -1)), `${lab.id} lesson leaks its flag body`);
+    assert.ok(!text.includes(flagPrefix(lab.id)), `${lab.id} lesson leaks its flag prefix`);
   }
 });
 
@@ -91,21 +90,23 @@ test('access guided content matches simulate(), the server evidence and the lab 
   for (const other of ['1002', '1003', '9999', 'abc', ' 1001', '1001 ']) assert.equal(simulate('access', other, false).attacked, true, `${JSON.stringify(other)} must count as another user's resource`);
   // observe.normal says the response is my own document 1001
   assert.ok(simulate('access', '1001', false).output.includes('내 문서 1001'));
-  // dataNote: evidence is always document #1002 regardless of input (server evidence takes no input)
-  assert.equal(evidenceFor.length, 1);
-  assert.ok(evidenceFor('access').includes('#1002') && g.observe.dataNote.includes('1002번'));
-  assert.ok(evidenceFor('access').includes('owner='), 'observe checklist refers to the owner field');
+  // dataNote: evidence is the document the learner requested, looked up in the virtual table
+  assert.ok(evidenceTemplate('access').includes('#{input}') && evidenceTemplate('access').includes('{row.title'));
+  assert.ok(g.observe.dataNote.includes('요청한 번호'));
+  assert.ok(evidenceTemplate('access').includes('owner='), 'observe checklist refers to the owner field');
   // defenseObserve quotes the exact defense output
   const defense = simulate('access', '1003', true);
   assert.equal(defense.blocked, true);
-  assert.ok(g.defenseObserve.some(t => t.includes(defense.output)));
+  // the fixed part of the output (before the input-specific detail after ' — ') is what the guide quotes
+  assert.ok(g.defenseObserve.some(t => t.includes(defense.output.split(' — ')[0])));
+  assert.ok(defense.output.includes('문서 1003의 소유자(user-2003)'), defense.output);
   // codeDiff: the added line exists in the secure code and not in the vulnerable code
   assert.ok(lab.secure.split('\n').includes(g.codeDiff.added));
   assert.ok(!lab.vulnerable.includes('ownerId'));
   assert.ok(lab.vulnerable.includes('return findDocument(id)'));
   // one how-to list per guided step, no flags anywhere
-  assert.equal(g.howto.length, 5);
-  assert.ok(!JSON.stringify(g).includes(flagFor('access').slice(3, -1)));
+  assert.equal(resolveGuided(lessons.access).howto.length, 5);
+  assert.ok(!JSON.stringify(g).includes(flagPrefix('access')));
 });
 
 test('every mission has guided content consistent with simulate() and its code', () => {

@@ -1,66 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { labs } from '../lib/labs.ts';
-import { normalizeRecords, FLAG_PATTERN } from '../lib/wargame.ts';
-import { flagFor, flagSecret, verifyFlag, encodeGuestState, decodeGuestState, readGuestState, guestCookieHeader, GUEST_COOKIE } from '../lib/wargame-server.ts';
+import { labs } from './helpers/seed.mjs';
+import { normalizeRecords } from '../lib/wargame.ts';
+import { encodeGuestState, decodeGuestState, readGuestState, guestCookieHeader, newGuestId, GUEST_COOKIE } from '../lib/wargame-server.ts';
 import { parseJsonBody, sameOrigin, MAX_BODY_BYTES } from '../lib/http.ts';
 import * as ops from '../lib/wargame-db-ops.ts';
 
-const ENV_KEYS = ['WARGAME_FLAG_SECRET', 'AUTH_SECRET', 'NODE_ENV'];
-function withEnv(env, fn) {
-  const saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]));
-  for (const k of ENV_KEYS) delete process.env[k];
-  Object.assign(process.env, env);
-  try { return fn(); } finally { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
-}
-
-/* ---------- FLAG secret handling ---------- */
-test('development without secrets uses readable fixed flags', () => withEnv({ NODE_ENV: 'development' }, () => {
-  assert.equal(flagSecret().source, 'none');
-  assert.equal(flagFor('access'), 'SG{idor_doc1002_owner_unchecked}');
-}));
-
-test('production without secrets never uses the public fixed flags', () => withEnv({ NODE_ENV: 'production' }, () => {
-  const warn = console.warn; console.warn = () => {};
-  try {
-    assert.equal(flagSecret().source, 'ephemeral');
-    const flag = flagFor('access');
-    assert.notEqual(flag, 'SG{idor_doc1002_owner_unchecked}');
-    assert.match(flag, FLAG_PATTERN);
-    assert.equal(flagFor('access'), flag, 'stable within the process');
-    assert.equal(verifyFlag('access', flag), true);
-    assert.equal(verifyFlag('access', 'SG{idor_doc1002_owner_unchecked}'), false);
-  } finally { console.warn = warn; }
-}));
-
-test('AUTH_SECRET derives deployment-specific flags; WARGAME_FLAG_SECRET takes precedence', () => {
-  const fromAuth = withEnv({ AUTH_SECRET: 'auth-secret-a' }, () => { assert.equal(flagSecret().source, 'auth-secret'); return flagFor('xss'); });
-  const fromOtherAuth = withEnv({ AUTH_SECRET: 'auth-secret-b' }, () => flagFor('xss'));
-  const fromFlag = withEnv({ AUTH_SECRET: 'auth-secret-a', WARGAME_FLAG_SECRET: 'flag-secret' }, () => { assert.equal(flagSecret().source, 'flag-secret'); return flagFor('xss'); });
-  assert.notEqual(fromAuth, fromOtherAuth);
-  assert.notEqual(fromAuth, fromFlag);
-  assert.ok(!fromAuth.includes('auth-secret'), 'the secret itself never appears in a flag');
-  for (const f of [fromAuth, fromFlag]) assert.match(f, FLAG_PATTERN);
+/* ---------- Guest identity and state cookie ---------- */
+test('each new guest gets a different random id', () => {
+  const a = newGuestId(), b = newGuestId();
+  assert.match(a, /^[a-f0-9]{32}$/);
+  assert.notEqual(a, b);
+  assert.notEqual(decodeGuestState(null).id, decodeGuestState(null).id, 'missing cookie → fresh guest');
 });
 
-/* ---------- Guest state cookie ---------- */
 test('guest state round-trips and rejects tampering', () => {
-  const value = encodeGuestState({ access: { a: true, d: false, h: 2, w: 1 } });
-  assert.deepEqual(decodeGuestState(value), { access: { a: true, d: false, h: 2, w: 1 } });
+  const state = { id: 'a'.repeat(32), m: { access: { a: true, d: false, h: 2, w: 1 } } };
+  const value = encodeGuestState(state);
+  assert.deepEqual(decodeGuestState(value), state);
   const [payload, sig] = value.split('.');
-  const forged = Buffer.from(JSON.stringify({ access: { a: true, d: true, h: 0, w: 0 } })).toString('base64url');
-  assert.deepEqual(decodeGuestState(`${forged}.${sig}`), {}, 'changed payload with old signature');
-  assert.deepEqual(decodeGuestState(`${payload}.${sig.slice(0, -2)}xx`), {}, 'changed signature');
-  for (const bad of [undefined, '', 'abc', 'a.b.c', 'x'.repeat(5000)]) assert.deepEqual(decodeGuestState(bad), {});
+  const forged = Buffer.from(JSON.stringify({ id: 'b'.repeat(32), m: { access: { a: true, d: true, h: 0, w: 0 } } })).toString('base64url');
+  for (const bad of [`${forged}.${sig}`, `${payload}.${sig.slice(0, -2)}xx`, undefined, '', 'abc', 'a.b.c', 'x'.repeat(5000)]) {
+    const decoded = decodeGuestState(bad);
+    assert.notEqual(decoded.id, 'b'.repeat(32), 'a forged id is never accepted');
+    assert.deepEqual(decoded.m, {}, 'tampered or missing cookie → empty state');
+  }
 });
 
-test('guest state drops unknown missions and clamps counters', () => {
-  const value = encodeGuestState({ nope: { a: true, d: true, h: 0, w: 0 }, xss: { a: 'yes', d: true, h: 99, w: -4 } });
-  assert.deepEqual(decodeGuestState(value), { xss: { a: false, d: true, h: 3, w: 0 } });
+test('guest state drops malformed mission ids and clamps counters', () => {
+  const value = encodeGuestState({ id: 'c'.repeat(32), m: { 'Bad Id': { a: true, d: true, h: 0, w: 0 }, xss: { a: 'yes', d: true, h: 99, w: -4 } } });
+  assert.deepEqual(decodeGuestState(value).m, { xss: { a: false, d: true, h: 3, w: 0 } });
+  const badId = encodeGuestState({ id: 'not-hex', m: {} });
+  assert.match(decodeGuestState(badId).id, /^[a-f0-9]{32}$/, 'invalid guest id is replaced');
 });
 
 test('guest cookie is HttpOnly, path-scoped, SameSite=Lax and Secure only over HTTPS', () => {
-  const state = { csrf: { a: true, d: true, h: 1, w: 0 } };
+  const state = { id: 'd'.repeat(32), m: { csrf: { a: true, d: true, h: 1, w: 0 } } };
   const http = guestCookieHeader(new Request('http://localhost:3000/api/wargame/submit'), state);
   const https = guestCookieHeader(new Request('https://example.test/api/wargame/submit'), state);
   for (const h of [http, https]) { assert.ok(h.startsWith(`${GUEST_COOKIE}=`)); assert.match(h, /HttpOnly/); assert.match(h, /Path=\/api\/wargame/); assert.match(h, /SameSite=Lax/); }

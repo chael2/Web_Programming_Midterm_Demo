@@ -5,22 +5,26 @@
 // server-side FLAG check, scoring and progress saving are exactly the same as other missions.
 import { useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { owaspCategories } from '@/lib/labs';
-import { basePoints, computeScore, MAX_HINTS, type MissionRecord } from '@/lib/wargame';
+import { basePoints, MAX_HINTS, type MissionRecord } from '@/lib/wargame';
+import { scorePreview } from './ScoreParts';
 import type { GuidedContent, Lesson } from '@/lib/lessons';
-import type { ClearInfo, Lab, Mode, Run } from '@/components/Wargame';
+import type { ClearInfo, Lab, RevealedSample, Run } from '@/components/Wargame';
+import type { DefenseReport } from '@/lib/mission-engine';
 import { HelpDialog, type HelpTab } from './HelpDialog';
 import { DefendStep, ObserveStep, PracticeStep, STEPS, SubmitStep, UnderstandStep } from './GuidedSteps';
 
 /** State and handlers passed down from MissionDetail (unchanged API logic). */
 export type MissionSession = {
   input: string; setInput: (value: string) => void;
-  lastAttack: Run | null; attackRun: Run | null; defenseRun: Run | null; evidence: string | null;
+  lastAttack: Run | null; attackRun: Run | null; history: Run[]; evidence: string | null;
+  defense: { measures: string[]; report: DefenseReport; tries: number } | null;
+  defend: (measures: string[]) => Promise<void>;
   attempts: { attack: boolean; defense: boolean };
-  hints: string[]; openHint: number | null; setOpenHint: Dispatch<SetStateAction<number | null>>; hintError: string;
+  hints: string[]; revealedSample: RevealedSample | null; openHint: number | null; setOpenHint: Dispatch<SetStateAction<number | null>>; hintError: string;
   flag: string; setFlag: (value: string) => void;
   feedback: { tone: 'error' | 'info'; text: string } | null; setFeedback: (value: { tone: 'error' | 'info'; text: string } | null) => void;
   busy: '' | 'run' | 'hint' | 'flag'; clear: ClearInfo | null;
-  run: (mode: Mode, value: string) => Promise<void>;
+  run: (value: string) => Promise<boolean>;
   revealHint: (level: number) => Promise<void>;
   fillSample: () => Promise<void>;
   submitFlag: () => Promise<void>;
@@ -32,6 +36,8 @@ export type StepProps = {
   base: number; signedIn: boolean; done: boolean; nextLab: Lab | null;
   go: (step: number) => void; openHelp: (tab: HelpTab) => void;
   quiz: Quiz; setQuiz: Dispatch<SetStateAction<Quiz>>; quizPassed: boolean;
+  prediction: 'attack' | 'safe' | null; setPrediction: (p: 'attack' | 'safe') => void;
+  measures: string[]; setMeasures: Dispatch<SetStateAction<string[]>>;
   onBack: () => void; onOpen: (id: string) => void; onReplay: () => void;
 };
 
@@ -42,6 +48,8 @@ export function GuidedMission({ lab, lesson, guided, signedIn, record, done, nex
   const [step, setStep] = useState(1);
   const [maxStep, setMaxStep] = useState(1);
   const [quiz, setQuiz] = useState<Quiz>({ choice: null, checked: null });
+  const [prediction, setPrediction] = useState<'attack' | 'safe' | null>(null);
+  const [measures, setMeasures] = useState<string[]>([]);
   const [helpTab, setHelpTab] = useState<HelpTab>('help');
   const dialogRef = useRef<HTMLDialogElement>(null);
   const category = owaspCategories.find(c => c.id === lab.categoryId)!;
@@ -54,9 +62,9 @@ export function GuidedMission({ lab, lesson, guided, signedIn, record, done, nex
     document.getElementById('gm-step')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   function openHelp(tab: HelpTab) { setHelpTab(tab); dialogRef.current?.showModal(); }
-  function onReplay() { session.replay(); setQuiz({ choice: null, checked: null }); setStep(2); setMaxStep(2); }
+  function onReplay() { session.replay(); setQuiz({ choice: null, checked: null }); setPrediction(null); setMeasures([]); setStep(2); setMaxStep(2); }
 
-  const props: StepProps = { lab, lesson, guided, session, record, base, signedIn, done, nextLab, go, openHelp, quiz, setQuiz, quizPassed, onBack, onOpen, onReplay };
+  const props: StepProps = { lab, lesson, guided, session, record, base, signedIn, done, nextLab, go, openHelp, quiz, setQuiz, quizPassed, prediction, setPrediction, measures, setMeasures, onBack, onOpen, onReplay };
   const Body = [UnderstandStep, PracticeStep, ObserveStep, DefendStep, SubmitStep][step - 1];
 
   return <article className="gm">
@@ -65,11 +73,11 @@ export function GuidedMission({ lab, lesson, guided, signedIn, record, done, nex
       <p className="eyebrow">Mission {lab.number} · {lab.categoryId}:2025 {category.ko}</p>
       <h1>{lab.title}</h1>
       <div className="gm-head-row">
-        <p className="gm-facts">난이도 {lab.level} · 배점 {base}점{done ? ' · 완료한 미션' : ''}</p>
+        <p className="gm-facts">난이도 {lab.level} · 기본 {base}점 + 보너스 최대 {scorePreview(lab.level, record).now.max - base}점{done ? ' · 완료한 미션' : ''}</p>
         <div className="gm-tools" role="group" aria-label="도움말과 힌트">
           <button className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => openHelp('help')}>도움말</button>
           <button className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => openHelp('hints')}>힌트 {record.hintsUsed}/{MAX_HINTS}</button>
-          <button className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => openHelp('score')}>점수 {computeScore(lab.level, record.hintsUsed, record.wrongSubmissions)}</button>
+          <button className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => openHelp('score')}>점수 {scorePreview(lab.level, record).now.total} · 최대 {scorePreview(lab.level, record).reachable}</button>
         </div>
       </div>
     </header>

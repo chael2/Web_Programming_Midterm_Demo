@@ -307,3 +307,24 @@ pre.code { margin: 0; padding: 14px 16px; background: var(--bg-sunken); border: 
   .summary-figures > div:nth-child(3) { padding-left: 0; border-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+/* ---------- Admin (mission management) ---------- */
+.admin-editor { margin-bottom: 44px; padding: 22px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.admin-editor h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
+.admin-editor h3 { font-size: 15px; font-weight: 600; margin: 22px 0 8px; }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px 18px; margin-bottom: 14px; }
+.admin-grid .wide { grid-column: 1 / -1; }
+.admin-check { flex-direction: row; align-items: center; gap: 8px; align-self: end; }
+.admin-check input { width: 18px; height: 18px; }
+.admin-errors { margin-top: 14px; padding: 10px 14px 10px 30px; list-style: disc; border-left: 2px solid var(--danger); background: var(--danger-soft); color: #f6b7b1; font-size: 13.5px; line-height: 1.7; }
+.admin-actions { display: flex; gap: 10px; margin-top: 16px; }
+.admin-list-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+
+/* Dashboard rank */
+.summary-rank { min-width: 0; }
+.summary-rank h2 { font-size: 22px; font-weight: 700; margin: 4px 0 10px; }
+.summary-rank .fine { margin-top: 8px; }
+.rank-steps { margin: 12px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.rank-steps li { padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 12.5px; color: var(--text-3); }
+.rank-steps li span { margin-left: 6px; font-family: var(--font-mono, monospace); }
+.rank-steps li.is-done { color: var(--text); border-color: var(--accent); }

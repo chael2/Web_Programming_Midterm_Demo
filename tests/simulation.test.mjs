@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { labs, owaspCategories, categoryUrl, normalizeCompleted, completedCategories, simulate } from '../lib/labs.ts';
+import { owaspCategories, categoryUrl, normalizeCompleted as normalizeIds, completedCategories as completedFor } from '../lib/labs.ts';
+import { labs, simulate } from './helpers/seed.mjs';
+import { toPublicMissions } from '../lib/mission-engine.ts';
+// Missions now come from MongoDB (seed file here); the helpers take the mission list explicitly.
+const ids = labs.map(l => l.id);
+const normalizeCompleted = value => normalizeIds(value, ids);
+const completedCategories = completed => completedFor(completed, labs);
 
 for (const lab of labs) {
   test(`${lab.id}: attack succeeds only in vulnerable mode`, () => {
@@ -34,7 +40,9 @@ test('all ten 2025 categories have a working representative scenario', () => {
     assert.ok(labs.some(l => l.categoryId === category.id));
     assert.ok(categoryUrl(category).startsWith(`https://top10.owasp.org/2025/${category.id}_2025-`));
   }
-  for (const lab of labs) assert.ok(lab.tag.startsWith(`${lab.categoryId}:2025`));
+  // tags are built when missions are sent to the browser
+  const publicList = toPublicMissions(labs, id => owaspCategories.find(c => c.id === id).title);
+  for (const m of publicList) assert.ok(m.tag.startsWith(`${m.categoryId}:2025 · `));
   assert.equal(labs.find(l => l.id === 'csrf').categoryId, 'A01');
   assert.equal(labs.find(l => l.id === 'xss').categoryId, 'A05');
   assert.equal(labs.find(l => l.id === 'injection').categoryId, 'A05');
